@@ -1,0 +1,434 @@
+# ============================================================================
+#  FlyBrain Trader: main config.
+#  Everything that can be tuned without editing code lives here.
+# ============================================================================
+
+project:
+  name: fly-brain-trader
+  seed: 42                      # global seed: input/output layout, noise, random agent
+  device: cpu                   # torch.sparse does not work on MPS, so we compute on CPU
+
+paths:
+  data: data.nosync             # raw data (in .gitignore; the .nosync suffix keeps macOS iCloud from syncing large dirs)
+  runs: runs.nosync             # checkpoints, reports, activation dumps
+  connectome: data.nosync/connectome
+  market: data.nosync/market
+  skeletons: data.nosync/skeletons
+
+# ---------------------------------------------------------------------------
+#  Disk: budget and cleanup. Keep the footprint of large artifacts in check.
+# ---------------------------------------------------------------------------
+housekeeping:
+  runs_budget_gb: 5.0           # cap for runs.nosync; above it, old runs are cleaned up
+  keep_checkpoints: 3           # how many latest checkpoints to keep per config
+  keep_raw_connectome: false    # delete raw CSVs after the binary cache is built
+  storage_backend: local        # local | hf | s3 (cloud backends can be added when local space runs out)
+
+# ---------------------------------------------------------------------------
+#  Connectome: which part of the brain to use
+# ---------------------------------------------------------------------------
+connectome:
+  version: "783"                # public FlyWire FAFB release
+  min_syn_count: 5              # minimum synapse count per edge
+  # Training subgraph: the mushroom bodies (the center of reward learning in the fly).
+  # The exact cell_class/cell_type string values are checked on first load;
+  # the loader prints the unique values and writes them to runs.nosync/connectome_vocab.txt
+  subgraph:
+    mode: mushroom_body         # mushroom_body | neuropil | threshold_only
+    neuropils: [MB_CA_L, MB_CA_R, MB_ML_L, MB_ML_R, MB_VL_L, MB_VL_R, MB_PED_L, MB_PED_R]
+    cell_class_patterns:        # regex on the cell_type / hemibrain_type field
+      kenyon:   "^KC"
+      output:   "^MBON"
+      dopamine: "^(PAM|PPL1|PPL2|DAN)"
+      inhibit:  "^(APL|DPM)$"
+      input:    "^(ALPN|.*_adPN|.*_lPN|.*_vPN|uPN|mPN|PN)"
+    sides: [left, right]        # can keep a single hemisphere to halve the graph
+  # Synapse sign by neurotransmitter (Dale's law: the sign is fixed, only the magnitude is learned)
+  neurotransmitter_sign:
+    acetylcholine: 1.0
+    glutamate: -1.0             # in Drosophila glutamate is more often inhibitory (GluCl)
+    gaba: -1.0
+    dopamine: 0.0               # modulators do not take part in direct transmission
+    octopamine: 0.0
+    serotonin: 0.0
+    unknown: 1.0
+
+# ---------------------------------------------------------------------------
+#  Model: how the graph becomes a network
+# ---------------------------------------------------------------------------
+model:
+  steps: 4                      # activity propagation steps per candle ("depth of thought")
+  leak: 0.3                     # leak: a_next = (1-leak)*a + leak*tanh(...)
+  nonlinearity: tanh            # tanh | relu
+  recurrent_across_bars: true   # do not reset activations between candles (short-term memory)
+  weight_init: log_syn_count    # log1p(syn_count), normalized over incoming edges
+  input_neurons_per_channel: 24 # how many PNs one input channel activates ("glomeruli")
+  output_gain: 1.5              # output sigmoid steepness
+  input_scale: 2.0              # overall strength of incoming weights after normalization.
+                                # 1: the signal dies out; 5+: neurons saturate
+                                # and stop learning. 2 gives a live range
+  adaptive_readout: true        # calibrate the output by the rolling spread
+                                # of the MBON difference: otherwise the position
+                                # fraction depends on graph size rather than on
+                                # what the fly sees
+  readout_decay: 0.97           # memory of the rolling output statistics.
+                                # Measured on the test period (3735 decisions):
+                                # at 0.995 the position got stuck: weekly
+                                # autocorrelation +0.71, Bitcoin held one sign
+                                # for 122 days in a row, with a 12h reward
+                                # horizon. At 0.97 autocorrelation is +0.21,
+                                # the longest streak 23 days, the median 3.8:
+                                # the position scale finally matches the
+                                # reward scale
+  dale_law: true                # edge sign is fixed
+  plastic_edges: kc_to_mbon     # kc_to_mbon | all: which connections are plastic at all
+  # --- methodology v2 ---
+  kc_sparsity: 0.05             # k-WTA: fraction of simultaneously active Kenyon cells.
+                                # In the fly it is ~5% (inhibitory APL). Without it
+                                # the KC code is dense (|a|~0.23), all MBONs see the
+                                # same thing, and market-state patterns are not
+                                # separated
+  noise_target: mbon            # mbon | all: where to inject exploration noise.
+                                # Previously all 6283 neurons were noisy, and the
+                                # trace remembered a corrupted "odor" instead of a
+                                # corrupted action
+  input_normalize: true         # normalize input strength to a constant on every candle
+                                # (lateral inhibition of the antennal lobe):
+                                # calm and stormy markets produce an equally
+                                # loud "odor"; only the pattern differs
+  input_drive_rms: 0.5          # target RMS input strength
+  kc_output_gain: 7.0           # gain of synapses FROM Kenyon cells. After k-WTA
+                                # only 5% of KCs fire into the MBONs instead of all,
+                                # and the drive dropped 20x (|MBON| 0.035). In the
+                                # fly the sparse code is compensated by strong
+                                # KC->MBON synapses. At 10 we had |MBON| 0.42 with
+                                # 13% saturated; at 7 we expect ~0.3 without
+                                # saturation
+  w_max: 20.0                   # clip on weight magnitude. 20, not 5: after kc_output_gain
+                                # the initial weights of edges from KCs reach ~14
+  normalize_incoming: true      # soft normalization of the summed incoming weights onto each MBON
+
+# ---------------------------------------------------------------------------
+#  Training
+# ---------------------------------------------------------------------------
+training:
+  rule: hebbian                 # hebbian | reinforce
+  # 2026-09-16: was 3/2. Measured over five completed cycles,
+  # weight_mean moved by 0.03-0.56% over the ENTIRE cycle, so 3 epochs gave
+  # the weights almost no chance to converge even with a corrected lr. 6/3 is
+  # the new starting point, to be confirmed/adjusted by a walk-forward sweep.
+  epochs: 6
+  early_stopping_patience: 3    # epochs without improvement on validation
+  # Warm-up of the readout calibration before an evaluated/traded segment
+  # (see Agent.run(warm_X=...)): hours BEFORE the segment starts; they do not
+  # count toward its metrics.
+  warmup_hours: 240
+  # The decision step that the lr of both rules is calibrated for.
+  # 2026-09-16: lr used to be defined PER DECISION, and with
+  # decision_timeframe=1h (cycle 5) the same history produced four times as
+  # many weight updates at the same step size, so the brain silently
+  # retrained four times as hard per unit of real time. Measured: cycle 5
+  # rewrote 96% of the weights in 3 epochs (cycle 7: 100% in 8 epochs),
+  # turnover 37 versus 2.5 for the formula, and the edge turned negative.
+  # Decision frequency adds no independent observations: with a 12h horizon
+  # and a 1h step, 12 consecutive decisions share nearly the same future
+  # window. The effective step is now lr * decision_stride /
+  # reference_stride, i.e. lr means "step per 4 hours of history".
+  lr_reference_timeframe: 4h
+  ensemble:
+    n_members: 5                # brains with different seeds (input layout,
+                                # MBON split, noise). The decision is the average.
+                                # 5 x 10 ms per candle, cheap; cuts variance a lot
+  gentle:                       # gentle mode for fanless laptops
+    enabled: true               # (prevents thermal throttling / overheating)
+    torch_threads: 4
+    pause_between_epochs_sec: 60
+    check_thermal: true         # stop if `pmset -g therm` reports throttling (macOS)
+  live_drift_limit: 0.05        # online-learning safety fuse: if the mean
+                                # weight shift from the starting weights exceeds
+                                # this, learning stops by itself. The fly learns
+                                # unattended for days, and weight blow-up would
+                                # otherwise go unnoticed
+  hebbian:
+    # 2026-09-16: was 0.002, which measurably did not move the weights (see
+    # training.epochs above). 0.05 is the starting point of a sweep over
+    # {0.02, 0.05, 0.1} on walk-forward (plan, verification step 4); it only
+    # makes sense together with the homeostasis model.homeostatic (otherwise
+    # the readout scale would blow up).
+    lr: 0.05
+    lr_live: 0.0002             # step in live mode: 10x smaller. The reward
+                                # arrives once per 12h so there is no hurry, and
+                                # a mistake costs more, with no data to retrain on
+    eligibility_decay: 0.8      # gamma of the trace. With a delayed reward the
+                                # trace is captured at decision time; decay is only
+                                # needed for memory within the window between
+                                # decisions
+    exploration_noise: 0.15     # noise on the MBONs: without it the Hebbian rule does not learn
+    reward_baseline_decay: 0.99 # moving average of the reward (dopamine prediction error)
+  reinforce:
+    lr: 0.0005
+    entropy_bonus: 0.01
+    reward_baseline_decay: 0.99
+
+# ---------------------------------------------------------------------------
+#  Market
+# ---------------------------------------------------------------------------
+market:
+  exchange: binance             # source of HISTORY and prices (mainnet, public API)
+  fallback_exchanges: [bybit, okx, kraken]
+  # 5 coins instead of 3 (2026-09-16): BTC/ETH/SOL + PAXG (gold, tokenized
+  # 1:1 to the gold price) + ZEC. BTC is FIRST on purpose: cross_coin_features
+  # (features/price.py) takes coins[0] as the market benchmark for the
+  # relative strength of the other coins, with column names literally "MKT:btc_*".
+  # CRCL (Circle stock on NYSE) was deliberately NOT added: it trades on
+  # weekdays 9:30-16:00 ET, and align() in market/fetch.py intersects the
+  # hourly timestamps of ALL coins, so the stock would truncate the history
+  # of the other five to NYSE trading hours.
+  symbols: [BTC/USDT, ETH/USDT, SOL/USDT, PAXG/USDT, ZEC/USDT]
+  timeframe: 1h                 # candles used to compute features
+  decision_timeframe: 4h        # the fly's decision step (methodology v2). Hourly
+                                # bars are almost pure noise and fees eat any edge;
+                                # at 4h the signal is cleaner and there are still
+                                # 6 decisions per day
+  since: "2020-08-01"           # verified 2026-09-16: PAXG/USDT on Binance starts
+                                # 2020-08-28, ZEC/USDT earlier; align() will trim
+                                # the common start to ~08-28, about 4 weeks, not
+                                # critical
+  features:                     # price features for each coin (methodology v2:
+    - log_return_1              # multi-scale, see features/price.py)
+    - log_return_4
+    - log_return_12
+    - log_return_24
+    - log_return_72
+    - log_return_168
+    - price_zscore_168
+    - volume_zscore_168
+    - rsi_14
+    - rsi_14_4h
+    - ema_spread_12_48
+    - volatility_24
+    - volatility_168
+    - vol_of_vol
+    - atr_14_rel
+    - drawdown_30d
+    - dist_sma_7d
+    - dist_sma_30d
+    - hour_sin
+    - hour_cos
+    - dow_sin
+    - dow_cos
+    # --- v3: forward-looking volatility (2026-09-16, D1): these used to live
+    # only in config/hard.yaml, while the reference formula uses the 168h std.
+    # Without these channels the fly tried to beat the formula at volatility
+    # timing while having STRICTLY LESS information about volatility than the
+    # formula itself.
+    - parkinson_24
+    - gk_24
+    - vol_ratio_24_168
+    - park_ratio_24_168
+    - seasonal_vol_now
+    - seasonal_vol_next12
+    - range_4h_rel
+    - weekend
+    - abs_ret_24_mean
+  baseline_feature: true        # COIN:base_weight: the formula's weight as an input (D1);
+                                # previously off by default, so the fly did not
+                                # know what it was applying its multiplier on top of
+  cross_coin: true              # BTC return for all, coin strength vs BTC,
+                                # BTC vs the basket (a substitute for dominance
+                                # history, which CoinGecko does not provide for free)
+  # Per-coin "fundamental" extra channels (2026-09-16), on top of the shared
+  # features list above. They are not a replacement: the fly learns for itself
+  # whether to trust them. For the sets see features/price.py:
+  # ELLIOTT_FEATURES/TREND_FEATURES/MEAN_REVERSION_FEATURES.
+  coin_features:
+    ETH: [elliott_dir, elliott_dist_from_pivot, elliott_wave_no, elliott_fib_retrace]  # Elliott waves
+    BTC: [trend_r2_168, trend_ema_slope_200, donchian_pos_55]                         # trend following
+    PAXG: [mr_zscore_12, mr_bb_pctb_20, mr_autocorr_24, mr_range_tightness]           # gold: frequent small trades (mean reversion)
+    ZEC: [liq_amihud, liq_volume_z, liq_volume_trend]  # no honest free history of ZEC on-chain metrics was found, so liquidity is used instead of a fake
+    # SOL: its fundamental is not set here; see external_features: sol_defi_tvl below
+    # (Solana DeFi TVL is a genuine on-chain metric, not a price-derived feature,
+    # so it takes a separate path rather than going through coin_features)
+  external_features: [fng, sol_defi_tvl]  # fng = Fear & Greed index (alternative.me,
+                                # no key, daily, as-of the publication date).
+                                # sol_defi_tvl = Solana DeFi TVL (DefiLlama, no key)
+  norm_window_hours: 720        # causal z-score: 30-day window
+  split:
+    train_end: "2024-06-01"
+    val_end: "2025-01-01"       # test is everything after
+  walk_forward:
+    enabled: false              # enabled in stage 5
+    refit_every_days: 90
+  adaptive_stride:
+    # Bounded-adaptive cadence: 4h in a calm market, 1h on a spike in
+    # realized volatility.
+    # Experimental: enabled by default for dry-run; not walk-forward validated.
+    # Trading runs in dry_run mode, so no real money is at risk. The mechanism
+    # is safe by default (see AdaptiveStrideCfg/live_engine.py): with
+    # enabled: false it behaves bit-for-bit as before; to roll back, set
+    # enabled back to false and restart serve.
+    enabled: true
+    calm_timeframe: "4h"
+    active_timeframe: "1h"
+    vol_high: 0.06
+    vol_low: 0.04
+    min_dwell_hours: 4.0
+
+# ---------------------------------------------------------------------------
+#  Portfolio and execution
+# ---------------------------------------------------------------------------
+trading:
+  initial_capital: 1500.0       # USDT (2026-09-16: reduced from 10000 for a live start)
+  allow_short: true             # are negative weights (shorts) allowed
+                                # No leverage: sum of |weights| <= 1
+
+  # --- what exactly the fly decides (methodology v2, after the 2026-09-15 measurements) ---
+  # direction: the fly sets side and size itself. Price direction is
+  #            unpredictable on our data (IC ~0.01), so this is almost a lottery
+  # exposure:  side and size come from the baseline risk-targeting formula,
+  #            and the fly learns a multiplier on top of it. Multiplier 1.0 =
+  #            exactly the formula, so any difference is the fly's contribution
+  position_mode: exposure
+  # 2026-09-16 ("give the fly leverage" plan): the previous chain of updates
+  # (exposure_max 2->4, target_daily_vol 0.02->0.04, max_weight_per_coin
+  # 0.40->0.75->0.50) aggressively raised BOTH the formula AND the fly's
+  # ceiling AT THE SAME TIME. Reconnaissance found why this did not work: the
+  # formula's gross exposure (sum of |formula weights| over 5 coins) at
+  # 0.04/0.50 averaged ~1.43, i.e. a sum above 1 on 91% of the history (100%
+  # of the validation window of cycles 4/7), and Portfolio.clip_target
+  # divides the WHOLE vector back by the sum whenever it exceeds 1.0
+  # (portfolio.py). So the fly's multiplier was automatically SHRUNK by
+  # exactly the factor by which the formula had been "overstuffed", and the
+  # fly, the formula and buy&hold effectively traded the same equal-weight
+  # portfolio. Cranking exposure_max further was physically pointless while
+  # the formula itself consumed all the headroom.
+  #
+  # The fix is not about "more/less aggressive" but about physical LEVERAGE:
+  # the formula now occupies at most baseline.max_gross=0.5 of capital (see
+  # below), and the fly has exposure_max=2.0 (neutral is NOW EXACTLY 1.0 at
+  # any exposure_max, see model.py read_out), so the multiplier can take
+  # exposure to cash (0) or double it to ~100% of capital. Absolute returns
+  # of both sides will drop by roughly half versus earlier runs, but the
+  # Sharpe difference between them becomes REAL for the first time, rather
+  # than an artifact of an identically truncated portfolio.
+  exposure_max: 2.0              # multiplier ceiling: 0 = out of the market,
+                                 # 1 = same as the formula (neutral), 2 = double
+
+  baseline:                     # the base on top of which the fly adjusts exposure
+    kind: vol_target            # vol_target | vol_trend | equal
+    vol_window: 168             # volatility estimation window, hours (one week)
+    target_daily_vol: 0.02      # target daily portfolio risk (was 0.04; see the
+                                # leverage explanation above: that is what inflated
+                                # the formula's gross beyond max_gross)
+    max_weight_per_coin: 0.30   # cap per coin (was 0.50)
+    max_gross: 0.5              # NEW: cap on the SUM of the formula's |weights|;
+                                # the key lever, see the explanation above
+    trend_window: 720           # for kind=vol_trend: monthly average
+  leverage: 1.0
+  fee_rate: 0.0005              # 0.05% taker
+  slippage: 0.0002              # 0.02%
+  guards:
+    max_fraction_per_coin: 0.60 # per-coin cap FOR THE FLY (the formula never
+                                # reaches it thanks to max_gross above): with
+                                # exposure_max=2 the multiplier can give up to 2x
+                                # the base weight on one coin, and 0.6 does not
+                                # clip that needlessly
+    min_position_change: 0.03   # do not trade until the target has moved by 3%
+                                 # of capital. 2026-09-16: was 0.08, but that
+                                 # value was tuned for the OLD scale of formula
+                                 # weights (~0.29 per coin on average), where
+                                 # 0.08 meant "the multiplier moved ~28% away
+                                 # from neutral". After max_gross=0.5 the average
+                                 # coin weight became 0.100, and the same
+                                 # threshold would require a move of 80%: the
+                                 # whole working middle of the multiplier range
+                                 # (0.5x-1.5x) became a dead zone, and the fly
+                                 # physically could not differ from the formula.
+                                 # 0.03 preserves the same RELATIVE sensitivity
+                                 # (~30%) at the new weight scale
+    max_trades_per_hour: 6
+    daily_drawdown_stop: 0.10   # -10% in a day: close everything, halt trading
+    manual_approval_first_n: 5  # the first N trades wait for a button press in the dashboard
+  executor:
+    # dry_run | paper | bybit_demo | binance_futures_testnet
+    #
+    # Neither Binance Futures Testnet (from September 2026 it requires KYC of
+    # the main account) nor Bybit Demo Trading (its API is not available in
+    # some regions, e.g. for EU-regulated accounts) is suitable as a
+    # third-party demo account with a live web interface. Live mode runs
+    # through the built-in simulator (paper) and the built-in dashboard
+    # instead of a third-party site. bybit_demo/binance_futures_testnet are
+    # kept in the code behind the same Adapter interface and can be enabled
+    # with a single line here if the platform or regional availability changes.
+    adapter: dry_run
+    testnet_base_url: "https://testnet.binancefuture.com"
+
+reward:
+  kind: vol_scaled_net_return   # decorative field, the code does not read it
+  vol_window: 24                # decorative: volatility is now ex-ante, taken from
+                                # trading.baseline (see reward.py, B2)
+  baseline_decay: 0.99          # decorative: delta normalization goes through
+                                # training.hebbian.reward_baseline_decay
+  # --- methodology v2 ---
+  per_coin: true                # decorative: CoinRewardTracker is always per coin
+  horizon_hours: 12             # reward horizon IN HOURS (2026-09-16, B3;
+                                # it used to be in DECISION STEPS of
+                                # decision_timeframe, so cycle 5 with
+                                # decision_timeframe=1h silently got a 3h
+                                # horizon instead of 12h).
+                                # The reward for the decision at t is known only
+                                # at t+H and is applied to the trace captured
+                                # at time t
+  turnover_penalty: 0.0         # 2026-09-16: was 0.1, a quantity in reward units
+                                # not tied to the real fee (0.1 against
+                                # fee+slippage of 0.07% is a penalty hundreds of
+                                # times larger than the actual trade cost). The
+                                # real cost is now computed UNCONDITIONALLY in
+                                # CoinRewardTracker from trading.fee_rate/
+                                # slippage (B4); this parameter is kept only for
+                                # backward compatibility of the tests
+
+# ---------------------------------------------------------------------------
+#  Visualization
+# ---------------------------------------------------------------------------
+viz:
+  record_activations: true
+  record_every_n_bars: 50       # subsampling: without it the dumps eat the disk
+  ws_fps: 10                    # rate of sending activations to the dashboard
+  server_host: "127.0.0.1"      # localhost only. Can be set to "0.0.0.0" to expose the dashboard on the LAN
+                                # (it has NO authentication, so do that only on trusted networks)
+  server_port: 8000
+
+# ---------------------------------------------------------------------------
+#  Teacher (methodology v2): a plain gradient-boosting model next to the fly.
+#  It looks for statistics in the feature table; the fly decides how far to trust it.
+# ---------------------------------------------------------------------------
+teacher:
+  enabled: false                # enabled once IC confirms an edge
+  horizons_hours: [12, 24]      # how far ahead we forecast returns
+  train_months: 18              # rolling training window
+  test_months: 2                # walk-forward step
+  # HistGradientBoostingRegressor hyperparameters
+  max_iter: 300
+  learning_rate: 0.05
+  max_depth: 4                  # shallow trees: little data, a lot of noise
+  min_samples_leaf: 200
+  l2: 1.0
+  min_ic: 0.03                  # below this there is no edge, so the teacher channels stay off
+
+sentiment:
+  enabled: false                # enabled in week 2 of methodology v2
+  provider: groq
+  # Verified 2026-09-15: llama-3.3 is no longer available on Groq. gpt-oss-20b
+  # responds in 0.4 s and scores tone correctly. The free-tier limit is
+  # 1000 requests/day and 8000 tokens/min per model, so headlines are
+  # scored in batches (batch_size items per request).
+  model: "openai/gpt-oss-20b"
+  batch_size: 20
+  cache: true
+
+analyst:
+  enabled: false                # weekly report, week 4
+  provider: groq
+  model: "openai/gpt-oss-120b"  # reasoning model, needs max_tokens headroom
+  max_tokens: 4000

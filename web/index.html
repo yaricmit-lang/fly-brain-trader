@@ -1,0 +1,1162 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlyBrain Trader</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.min.js"></script>
+<!-- lightweight-charts is not on cdnjs (checked, 404), so we load it from jsdelivr -->
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root{
+    --bg:#0a0d12; --panel:#121820; --line:#1f2a36; --text:#dbe4ee; --dim:#7c8b9d;
+    --up:#2ebd85; --down:#e0516b; --accent:#f0b429; --kc:#4da3ff; --mbon:#ff8a4d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:13px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",Segoe UI,sans-serif}
+  #app{display:flex;flex-direction:column;min-height:100vh}
+  /* top row: brain on the left, account/equity/training on the right, with a fixed
+     height; each half scrolls on its own. Below it, the rest of the
+     dashboard runs as a single full-width strip and scrolls with the
+     page (previously a single #right spanned the full screen height) */
+  #toprow{display:grid;grid-template-columns:2fr minmax(480px,1fr);height:62vh;min-height:480px;
+          border-bottom:1px solid var(--line)}
+  #brainwrap{position:relative;border-right:1px solid var(--line);min-height:0}
+  #brain{width:100%;height:100%;display:block}
+  .overlay{position:absolute;pointer-events:none}
+  #title{top:14px;left:18px}
+  #title h1{margin:0;font-size:15px;font-weight:600;letter-spacing:.2px}
+  #title p{margin:2px 0 0;color:var(--dim);font-size:11px}
+  #mode{top:14px;right:18px;padding:5px 11px;border-radius:5px;font-size:11px;
+        font-weight:600;letter-spacing:.4px;background:#2a2114;color:var(--accent);
+        border:1px solid #4a3a1c;transition:background .3s,color .3s,border-color .3s}
+  #execmode{top:44px;right:18px;font-size:10px;color:var(--dim)}
+  /* min-height:0 is required: without it the grid column stretched to fit
+     the content of the right panel (the cycle cards made it taller than the screen),
+     which also stretched the brain on the left beyond the visible area
+     (it visually "fell down"), and there was nothing to scroll the panel with:
+     the content overflowed 100vh and body{overflow:hidden} cut off access to it */
+  #account{display:flex;flex-direction:column;min-width:0;min-height:0;overflow-y:auto}
+  #below{width:100%}
+  .panel{border-bottom:1px solid var(--line);padding:12px 14px;min-width:0}
+  .panel h2{margin:0 0 9px;font-size:11px;font-weight:600;color:var(--dim);
+            text-transform:uppercase;letter-spacing:.7px}
+  #stats{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:8px 10px}
+  .stat .k{color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.4px}
+  .stat .v{font-size:17px;font-weight:600;margin-top:2px;font-variant-numeric:tabular-nums}
+  #chart{height:210px}
+  #equitychart{height:150px}
+  .tabs{display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap}
+  .tab{background:var(--panel);color:var(--dim);border:1px solid var(--line);border-radius:5px;
+       padding:3px 9px;font-size:10.5px;cursor:pointer;font-variant-numeric:tabular-nums}
+  .tab:hover{color:var(--text)}
+  .tab.active{color:var(--kc);border-color:var(--kc)}
+  #trades{max-height:280px;overflow-y:auto}
+  /* coins as a vertical list, each one a full-size block, not
+     split into narrow columns: the candlestick chart has to be genuinely readable */
+  .coinsection{border-top:1px solid var(--line);padding:14px 0}
+  .coinsection:first-child{border-top:none;padding-top:0}
+  .coinsection .head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px}
+  .coinsection .name{font-size:14px;font-weight:600;letter-spacing:.3px}
+  .coinsection .price{font-size:18px;font-weight:600;font-variant-numeric:tabular-nums}
+  .coinsection .exp{font-size:11px;color:var(--dim);margin-top:2px}
+  .coinsection .mchart{height:220px}
+  .coinsection .hist{margin-top:8px}
+  .coinsection .hrow{display:flex;justify-content:space-between;font-size:11px;margin-top:4px;
+                     font-variant-numeric:tabular-nums;padding:3px 0;border-top:1px solid var(--line)}
+  .coinsection .hrow .t{color:var(--dim)}
+  #events{max-height:220px;overflow-y:auto}
+  .event{border-left:2px solid var(--line);padding:5px 0 5px 10px;margin-top:6px;font-size:11px}
+  .event .t{color:var(--dim);font-size:10px;font-variant-numeric:tabular-nums}
+  .event.ev-start{border-left-color:var(--up)}
+  .event.ev-stop{border-left-color:var(--dim)}
+  .event.ev-warn{border-left-color:var(--accent)}
+  .event.ev-danger{border-left-color:var(--down)}
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  th{text-align:right;color:var(--dim);font-weight:500;font-size:10px;padding:3px 6px;
+     text-transform:uppercase;letter-spacing:.4px}
+  th:first-child,td:first-child{text-align:left}
+  td{text-align:right;padding:4px 6px;border-top:1px solid var(--line)}
+  .bar{height:4px;border-radius:2px;background:var(--line);overflow:hidden;margin-top:3px}
+  .bar i{display:block;height:100%;background:var(--kc)}
+  /* was flex:1, which stretched into the "remaining space" in the column, but now the whole
+     #right scrolls by itself, so "remaining space" means nothing.
+     Give the log its own reasonable height with its own inner scrolling */
+  #log{max-height:320px;overflow-y:auto;padding:0 14px 14px}
+  .entry{border-left:2px solid var(--line);padding:6px 0 6px 10px;margin-top:8px}
+  .entry.trade{border-left-color:var(--up)}
+  .entry.blocked{border-left-color:var(--down)}
+  .entry .t{color:var(--dim);font-size:10px;font-variant-numeric:tabular-nums}
+  .entry .m{margin-top:2px}
+  .entry .r{color:var(--accent);font-size:11px;margin-top:3px}
+  .up{color:var(--up)} .down{color:var(--down)} .dim{color:var(--dim)} .hold{color:var(--kc)}
+  button{background:var(--panel);color:var(--text);border:1px solid var(--line);
+         border-radius:5px;padding:5px 11px;font-size:11px;cursor:pointer;font-family:inherit}
+  button:hover{border-color:var(--dim)}
+  button.go{border-color:var(--up);color:var(--up)}
+  button.no{border-color:var(--down);color:var(--down)}
+  #approve{display:none;background:#1a1410;border:1px solid #4a3a1c;border-radius:6px;
+           padding:10px;margin-top:9px}
+  #conn{position:fixed;bottom:10px;right:14px;font-size:10px;color:var(--dim)}
+  .cyclecard{background:var(--panel);border:1px solid var(--line);border-radius:6px;
+             padding:10px 12px;margin-top:8px}
+  .cyclecard h3{margin:0;font-size:12px;font-weight:600}
+  .cyclecard p{margin:4px 0 0;color:var(--dim);font-size:11px;line-height:1.4}
+  .cyclebadge{font-size:9.5px;padding:2px 8px;border-radius:10px;font-weight:600;
+              letter-spacing:.3px;white-space:nowrap;flex-shrink:0}
+  .badge-idle{background:#1a2129;color:var(--dim)}
+  .badge-running{background:#241f14;color:#c9a15a}
+  .badge-done{background:#142418;color:#40d97a}
+  .badge-failed{background:#2a1414;color:#f0555f}
+  .badge-live{background:#12202a;color:#5fb8e8;margin-left:6px}
+  .cyclelog{margin-top:8px;background:#0d1117;border:1px solid var(--line);border-radius:4px;
+            padding:6px 8px;font-size:10px;color:#9fd0ff;max-height:150px;overflow-y:auto;
+            white-space:pre-wrap;display:none}
+  button:disabled{opacity:.35;cursor:default}
+  button:disabled:hover{border-color:var(--line)}
+</style>
+</head>
+<body>
+<div id="app">
+ <div id="toprow">
+  <div id="brainwrap">
+    <canvas id="brain"></canvas>
+    <div class="overlay" id="title">
+      <h1>FlyBrain Trader</h1>
+      <p id="sub">loading brain…</p>
+    </div>
+    <div class="overlay" id="mode">—</div>
+    <div class="overlay" id="execmode">—</div>
+  </div>
+
+  <div id="account">
+    <div class="panel">
+      <h2>Account</h2>
+      <div id="stats">
+        <div class="stat"><div class="k">Equity</div><div class="v" id="equity">—</div></div>
+        <div class="stat"><div class="k">Return since start</div><div class="v" id="pnl">—</div></div>
+        <div class="stat"><div class="k">Decisions</div><div class="v" id="ndec">0</div></div>
+        <div class="stat"><div class="k">Next decision</div><div class="v" id="next">—</div></div>
+      </div>
+      <div style="margin-top:9px;display:flex;justify-content:space-between;align-items:baseline">
+        <span class="dim" style="font-size:11px">the brain thinks continuously · trades only at the decision-cadence boundary</span>
+        <span id="thoughts" class="dim" style="font-variant-numeric:tabular-nums">0 thoughts</span>
+      </div>
+      <div id="approve">
+        <div style="margin-bottom:8px">The fly wants to trade. The first trades require approval.</div>
+        <button class="go" onclick="post('/api/approve')">Approve</button>
+        <button class="no" onclick="post('/api/reject')">Reject</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Equity</h2>
+      <div id="equitychart"></div>
+    </div>
+
+    <div class="panel" id="learnpanel">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:9px">
+        <h2 style="margin:0">Training</h2>
+        <div>
+          <button class="go" onclick="post('/api/learning/start')">Train</button>
+          <button onclick="post('/api/learning/stop')">Pause training</button>
+          <button class="no" onclick="shutdownBrain()">Shut down brain</button>
+        </div>
+      </div>
+      <div id="ckpt" class="dim" style="margin-bottom:8px">checkpoint: —</div>
+      <div style="margin-bottom:9px;display:flex;gap:6px;flex-wrap:wrap">
+        <button class="no" onclick="rollbackToBase()">Roll back to base</button>
+        <button onclick="resetKillSwitch()">Reset daily stop</button>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <span class="dim" style="font-size:11px">weight drift from start</span>
+        <span id="driftval" style="font-variant-numeric:tabular-nums">0.0000</span>
+      </div>
+      <div class="bar" style="margin-top:5px"><i id="driftbar" style="width:0%;background:var(--accent)"></i></div>
+      <canvas id="driftchart" width="440" height="46" style="margin-top:8px;width:100%;height:46px"></canvas>
+      <div id="rewardfeed" style="margin-top:9px;font-size:11px"></div>
+      <div style="margin-top:10px;padding-top:9px;border-top:1px solid var(--line)">
+        <div class="dim" style="font-size:10px;margin-bottom:4px">all fly logs in the terminal: paste and run:</div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <code id="tailcmd" style="flex:1;background:#0d1117;border:1px solid var(--line);
+                border-radius:4px;padding:5px 8px;font-size:10.5px;color:#9fd0ff;overflow-x:auto;
+                white-space:nowrap">python scripts/tail_logs.py</code>
+          <button onclick="copyTailCmd()">Copy</button>
+        </div>
+      </div>
+    </div>
+  </div>
+ </div>
+
+ <div id="below">
+    <div class="panel">
+      <h2>Coins</h2>
+      <div id="coin_list"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Training cycles before live</h2>
+      <p class="dim" style="margin:0 0 9px;font-size:11px;line-height:1.4">
+        Two active candidates: cycle 6 targets returns on 6 specific seasonal
+        periods; cycle 7 uses the Hebbian rule with a raised dopamine dose on a
+        shared window. "Make live" switches the live brain manually: the decision
+        is always yours, the dashboard never chooses anything itself.
+      </p>
+      <div id="cycles_all" style="margin:0 0 9px;display:flex;gap:6px;align-items:center;flex-wrap:wrap"></div>
+      <div id="cycles">loading…</div>
+    </div>
+
+    <div class="panel">
+      <h2>Trade history</h2>
+      <div id="trades">
+        <table><thead><tr>
+          <th>Time</th><th>Coin</th><th>Side</th><th>Qty</th><th>Price</th><th>Fee</th>
+        </tr></thead><tbody id="trades_body"></tbody></table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Event log</h2>
+      <div id="events"></div>
+    </div>
+
+    <div class="panel" style="display:flex;justify-content:space-between;align-items:center">
+      <h2 style="margin:0">Decision log</h2>
+      <div>
+        <button onclick="post('/api/decide')">Decide now</button>
+        <button id="pausebtn" onclick="togglePause()">Pause</button>
+      </div>
+    </div>
+    <div id="log"></div>
+ </div>
+</div>
+<div id="conn">connecting…</div>
+
+<script>
+// ---------------------------------------------------------------------------
+//  3D brain. The geometry is uploaded ONCE and only the color changes in the loop;
+//  that is the only way 139 thousand points render smoothly.
+// ---------------------------------------------------------------------------
+// A calm pastel blue is the common color of the mushroom-body neurons.
+// Role is distinguished only for dopaminergic neurons (DAN, code 2): at the moment
+// the fly receives dopamine they flash green on reward and red on
+// punishment, then smoothly fade back to pastel. That is the visible
+// moment of learning, not just a number in the corner.
+const PASTEL = [0.55, 0.80, 0.98];
+// Green without a blue tint: PASTEL is entirely blue already, and a green
+// with a noticeable blue component (it was 0.52) blended into the background to the eye.
+// A pure green-yellow contrasts with blue far more honestly.
+const REWARD_GOOD = [0.25, 0.95, 0.18];
+const REWARD_BAD  = [0.96, 0.30, 0.32];
+const DAN_ROLE = 2;
+const FLASH_MS = 4000;
+const BG = [0.13,0.17,0.22];
+
+// Two layers instead of one. 138 thousand points with additive brightness merge
+// into a white blob, and the mushroom bodies are not visible in it. So the brain background is
+// a separate dim cloud with normal blending, and the subgraph is a bright layer
+// on top, additive. Only the second one has its color updated: 6,283 vertices.
+let renderer, scene, camera, group, mbColors, meta, mbIndex, mbRole;
+let spotGeo, spotColors, haloGeo, haloColors, mbPosArr;
+let edgeA = null, edgeB = null;   // KC→MBON edges in LOCAL indices (0..n_mb-1)
+const MAX_SPOT = 260, MAX_HALO = 900;
+let danColors, danKs = [];   // dopaminergic: a separate, larger layer:
+                              // there are only 321 of them out of 6283, and in the general mass of points
+                              // a reward flash would otherwise go unnoticed
+let activations = null, spin = 0, spotDirty = false;
+let flashStartClient = -1e9, flashSign = 0, lastRewardTs = 0;
+
+// three.js draws points as square sprites unless given a texture,
+// hence the "big squares" instead of round neurons, especially
+// noticeable on the large points of the dopamine layer. We draw a soft
+// circle with a feathered edge on a canvas once and use it as an alpha mask.
+function makeCircleTexture(size=64){
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = size;
+  const ctx = cv.getContext('2d');
+  const r = size / 2;
+  const grad = ctx.createRadialGradient(r, r, 0, r, r, r);
+  grad.addColorStop(0.0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.5, 'rgba(255,255,255,0.85)');
+  grad.addColorStop(1.0, 'rgba(255,255,255,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(r, r, r, 0, Math.PI * 2);
+  ctx.fill();
+  const tex = new THREE.CanvasTexture(cv);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+async function initBrain(){
+  const canvas = document.getElementById('brain');
+  const dotTexture = makeCircleTexture();
+  renderer = new THREE.WebGLRenderer({canvas, antialias:true});
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(42, 1, 0.01, 100);
+  camera.position.set(0, 0, 3.1);
+  resize();
+
+  meta = await (await fetch('/api/geometry.json')).json();
+  const buf = await (await fetch('/api/geometry')).arrayBuffer();
+  const L = meta.layout;
+  const pos16 = new Int16Array(buf, L.positions.offset, L.positions.count);
+  mbIndex = new Int32Array(buf, L.mb_index.offset, L.mb_index.count);
+  mbRole  = new Uint8Array(buf, L.mb_role.offset,  L.mb_role.count);
+  const edges = new Int32Array(buf, L.edges.offset, L.edges.count);
+
+  const n = meta.n_neurons;
+  const pos = new Float32Array(n*3);
+  for(let i=0;i<n*3;i++) pos[i] = pos16[i] / meta.position_scale;
+
+  group = new THREE.Group();
+  scene.add(group);
+
+  // --- layer 1: brain background, everything except the mushroom bodies ---
+  const isMB = new Uint8Array(n);
+  for(let k=0;k<mbIndex.length;k++) isMB[mbIndex[k]] = 1;
+  const bg = [];
+  for(let i=0;i<n;i++) if(!isMB[i]){ bg.push(pos[i*3], pos[i*3+1], pos[i*3+2]); }
+  const bgGeo = new THREE.BufferGeometry();
+  bgGeo.setAttribute('position', new THREE.Float32BufferAttribute(bg, 3));
+  group.add(new THREE.Points(bgGeo, new THREE.PointsMaterial({
+    size:0.0055, color:new THREE.Color(BG[0],BG[1],BG[2]), map:dotTexture,
+    transparent:true, opacity:0.5, sizeAttenuation:true, depthWrite:false,
+  })));
+
+  // --- layer 2: the mushroom bodies, these are what glow ---
+  const mbPos = new Float32Array(mbIndex.length*3);
+  for(let k=0;k<mbIndex.length;k++){
+    const i = mbIndex[k];
+    mbPos[k*3]=pos[i*3]; mbPos[k*3+1]=pos[i*3+1]; mbPos[k*3+2]=pos[i*3+2];
+  }
+  mbPosArr = mbPos;
+  const mbCol = new Float32Array(mbIndex.length*3);
+  const mbGeo = new THREE.BufferGeometry();
+  mbGeo.setAttribute('position', new THREE.BufferAttribute(mbPos, 3));
+  mbColors = new THREE.BufferAttribute(mbCol, 3);
+  mbGeo.setAttribute('color', mbColors);
+  group.add(new THREE.Points(mbGeo, new THREE.PointsMaterial({
+    size:0.016, vertexColors:true, map:dotTexture, transparent:true, opacity:0.95,
+    sizeAttenuation:true, depthWrite:false, blending:THREE.AdditiveBlending,
+  })));
+
+  // --- layer 3: dopamine neurons separately, larger: a "reward panel" ---
+  for(let k=0;k<mbIndex.length;k++) if(mbRole[k]===DAN_ROLE) danKs.push(k);
+  const danPos = new Float32Array(danKs.length*3);
+  danKs.forEach((k,j)=>{ danPos[j*3]=mbPos[k*3]; danPos[j*3+1]=mbPos[k*3+1]; danPos[j*3+2]=mbPos[k*3+2]; });
+  const danGeo = new THREE.BufferGeometry();
+  danGeo.setAttribute('position', new THREE.BufferAttribute(danPos, 3));
+  danColors = new THREE.BufferAttribute(new Float32Array(danKs.length*3), 3);
+  danGeo.setAttribute('color', danColors);
+  // NormalBlending, not Additive: the dopamine layer is drawn ON TOP of the same
+  // points as the mushroom-body layer (same coordinates). With additive
+  // brightness the green/red signal simply drowned in the pastel blue background:
+  // the colors were summed rather than overlaid. Here we need overlay.
+  group.add(new THREE.Points(danGeo, new THREE.PointsMaterial({
+    size:0.05, vertexColors:true, map:dotTexture, transparent:true, opacity:1.0,
+    sizeAttenuation:true, depthWrite:false, blending:THREE.NormalBlending,
+  })));
+
+  // --- layers 4/5: a "spotlight" on genuinely active neurons + a halo of neighbors ---
+  // three.js cannot vary point size per vertex without a shader; instead there are
+  // two separate point systems with a fixed but DIFFERENT size: a large, bright one
+  // over the most active neurons, and a second, smaller and dimmer one
+  // over their graph neighbors (KC→MBON), so the signal is not isolated
+  // at one point; it genuinely flows along synapses to the next cell.
+  // A buffer of fixed capacity, with drawRange moving the visible part:
+  // cheaper than rebuilding the geometry every time.
+  const mkSpotLayer = (cap, size) => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(cap*3), 3));
+    const col = new THREE.BufferAttribute(new Float32Array(cap*3), 3);
+    geo.setAttribute('color', col);
+    geo.setDrawRange(0, 0);
+    const pts = new THREE.Points(geo, new THREE.PointsMaterial({
+      size, vertexColors:true, map:dotTexture, transparent:true, opacity:1.0,
+      sizeAttenuation:true, depthWrite:false, blending:THREE.AdditiveBlending,
+    }));
+    group.add(pts);
+    return { geo, col };
+  };
+  ({ geo: haloGeo, col: haloColors } = mkSpotLayer(MAX_HALO, 0.028));
+  ({ geo: spotGeo, col: spotColors } = mkSpotLayer(MAX_SPOT, 0.062));
+
+  // edges from geometry.bin use global neuron indices; activations arrive
+  // in LOCAL indices (0..n_mb-1). We convert once on load.
+  const globalToLocal = new Int32Array(n).fill(-1);
+  for(let k=0;k<mbIndex.length;k++) globalToLocal[mbIndex[k]] = k;
+  const eaLocal = [], ebLocal = [];
+  for(let i=0;i<edges.length;i+=2){
+    const kA = globalToLocal[edges[i]], kB = globalToLocal[edges[i+1]];
+    if(kA>=0 && kB>=0){ eaLocal.push(kA, kB); ebLocal.push(kB, kA); }  // both directions
+  }
+  edgeA = Int32Array.from(eaLocal);
+  edgeB = Int32Array.from(ebLocal);
+
+  paint();   // color before activations arrive
+
+  // connections of Kenyon cells to output neurons as a thin mesh
+  const lp = new Float32Array(edges.length*3);
+  for(let i=0;i<edges.length;i++){
+    const v = edges[i];
+    lp[i*3]=pos[v*3]; lp[i*3+1]=pos[v*3+1]; lp[i*3+2]=pos[v*3+2];
+  }
+  const lg = new THREE.BufferGeometry();
+  lg.setAttribute('position', new THREE.BufferAttribute(lp,3));
+  group.add(new THREE.LineSegments(lg, new THREE.LineBasicMaterial({
+    color:0x1e3a52, transparent:true, opacity:0.07, blending:THREE.AdditiveBlending})));
+
+  document.getElementById('sub').textContent =
+    meta.n_neurons.toLocaleString('en-GB') + ' neurons · glowing: ' +
+    meta.n_mb.toLocaleString('en-GB') + ' mushroom-body neurons';
+  animate();
+}
+
+function paint(){
+  if(!mbColors) return;
+
+  // Dopamine flash: compute the decay every frame, not only when
+  // new activations arrive; otherwise the fade would be jerky (data
+  // from the server comes every few seconds, but we need 60 frames per second).
+  const elapsed = performance.now() - flashStartClient;
+  const flashOn = elapsed >= 0 && elapsed < FLASH_MS;
+  const decay = flashOn ? 1 - elapsed / FLASH_MS : 0;
+  const flashCol = flashSign >= 0 ? REWARD_GOOD : REWARD_BAD;
+
+  // --- the whole mushroom-body subgraph: an even pastel tone, ---
+  // --- brightness only from activity, no burn-out to white ---
+  const c = mbColors.array;
+  for(let k=0;k<mbIndex.length;k++){
+    const a = activations ? Math.abs(activations[k]-128)/128 : 0;
+    const g = 0.24 + a*0.85;
+    c[k*3]=PASTEL[0]*g; c[k*3+1]=PASTEL[1]*g; c[k*3+2]=PASTEL[2]*g;
+  }
+  mbColors.needsUpdate = true;
+
+  // --- dopamine neurons in the large layer: this is where the reward flash lives ---
+  if(danColors){
+    const dc = danColors.array;
+    for(let j=0;j<danKs.length;j++){
+      const k = danKs[j];
+      const a = activations ? Math.abs(activations[k]-128)/128 : 0;
+      let col = PASTEL, g = 0.30 + a*0.7;
+      if(flashOn){
+        // Blend the color more sharply (t cubed), so that even at the start of the decay
+        // green/red dominates over pastel rather than getting lost in it
+        const t = Math.pow(decay, 0.4);
+        col = [
+          PASTEL[0]*(1-t) + flashCol[0]*t,
+          PASTEL[1]*(1-t) + flashCol[1]*t,
+          PASTEL[2]*(1-t) + flashCol[2]*t,
+        ];
+        g = 0.7 + decay*1.1 + a*0.3;
+      }
+      dc[j*3]=col[0]*g; dc[j*3+1]=col[1]*g; dc[j*3+2]=col[2]*g;
+    }
+    danColors.needsUpdate = true;
+  }
+
+  if(spotDirty && edgeA){ updateSpotlight(); spotDirty = false; }
+}
+
+function updateSpotlight(){
+  if(!activations || !mbPosArr) return;
+  const n = mbIndex.length;
+  // activity strength is the same quantity that colors the main layer; we just
+  // pick out the brightest ones with a separate, noticeably larger layer
+  const strength = new Float32Array(n);
+  for(let k=0;k<n;k++) strength[k] = Math.abs(activations[k]-128)/128;
+
+  const idx = new Array(n);
+  for(let k=0;k<n;k++) idx[k] = k;
+  idx.sort((a,b) => strength[b]-strength[a]);
+  const primary = idx.slice(0, MAX_SPOT).filter(k => strength[k] > 0.35);
+
+  const isPrimary = new Uint8Array(n);
+  for(const k of primary) isPrimary[k] = 1;
+
+  // halo: neighbors by REAL KC<->MBON connections (not by 3D distance);
+  // in a real fly the signal flows along the synapse to the next cell, rather than
+  // just "infecting" everything that hangs nearby in space
+  const haloSeen = new Uint8Array(n);
+  const halo = [];
+  for(let i=0; i<edgeA.length && halo.length<MAX_HALO; i++){
+    const a = edgeA[i], b = edgeB[i];
+    if(isPrimary[a] && !isPrimary[b] && !haloSeen[b]){ haloSeen[b]=1; halo.push(b); }
+  }
+
+  const sp = spotGeo.attributes.position.array, sc = spotColors.array;
+  primary.forEach((k,j) => {
+    sp[j*3]=mbPosArr[k*3]; sp[j*3+1]=mbPosArr[k*3+1]; sp[j*3+2]=mbPosArr[k*3+2];
+    const g = 0.65 + strength[k]*0.9;   // brighter than in the main layer: that is the accent
+    sc[j*3]=Math.min(1,PASTEL[0]*g+0.3); sc[j*3+1]=Math.min(1,PASTEL[1]*g+0.3); sc[j*3+2]=Math.min(1,PASTEL[2]*g+0.15);
+  });
+  spotGeo.attributes.position.needsUpdate = true;
+  spotColors.needsUpdate = true;
+  spotGeo.setDrawRange(0, primary.length);
+
+  const hp = haloGeo.attributes.position.array, hc = haloColors.array;
+  halo.forEach((k,j) => {
+    hp[j*3]=mbPosArr[k*3]; hp[j*3+1]=mbPosArr[k*3+1]; hp[j*3+2]=mbPosArr[k*3+2];
+    hc[j*3]=PASTEL[0]*0.6; hc[j*3+1]=PASTEL[1]*0.6; hc[j*3+2]=PASTEL[2]*0.65;
+  });
+  haloGeo.attributes.position.needsUpdate = true;
+  haloColors.needsUpdate = true;
+  haloGeo.setDrawRange(0, halo.length);
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  paint();   // every frame, otherwise the dopamine flash fades in jerks
+  if(group){ group.rotation.y = spin; group.rotation.x = rotX; }
+  renderer.render(scene, camera);
+}
+
+function resize(){
+  const w = document.getElementById('brainwrap').clientWidth;
+  const h = document.getElementById('brainwrap').clientHeight;
+  renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+
+// Rotation and zoom by mouse only over the brain itself. Previously we listened on the whole
+// window: scrolling the right panel zoomed the brain, and clicking a button started
+// a rotation. We attach mousedown and wheel to #brainwrap, not to window.
+let drag=false, px=0, py=0, rotX=0;
+const brainEl = document.getElementById('brainwrap');
+brainEl.addEventListener('mousedown', e=>{drag=true;px=e.clientX;py=e.clientY});
+addEventListener('mouseup', ()=>drag=false);
+addEventListener('mousemove', e=>{
+  if(!drag) return;
+  spin += (e.clientX-px)*0.005;
+  rotX = Math.max(-1.4, Math.min(1.4, rotX + (e.clientY-py)*0.005));
+  px=e.clientX; py=e.clientY;
+});
+brainEl.addEventListener('wheel', e=>{
+  e.preventDefault();
+  camera.position.z = Math.max(1.2, Math.min(7, camera.position.z + e.deltaY*0.002));
+}, {passive:false});
+
+// ---------------------------------------------------------------------------
+//  Coins: a full-size candlestick section for each one, one after another
+//  vertically, not narrow sparkline columns but a proper readable
+//  chart for each of the five. Previously there was one shared chart showing
+//  only the FIRST coin from the /api/candles response; the other four were silently
+//  dropped.
+// ---------------------------------------------------------------------------
+const coinCharts = {};   // coin -> {chart, series}
+let coinListBuilt = false;
+
+function ensureCoinList(coins){
+  if(coinListBuilt) return;
+  const list = document.getElementById('coin_list');
+  list.innerHTML = coins.map(c => `
+    <div class="coinsection" id="section_${c}">
+      <div class="head">
+        <div>
+          <div class="name">${c}</div>
+          <div class="exp" id="mexp_${c}"></div>
+        </div>
+        <div class="price" id="mprice_${c}">—</div>
+      </div>
+      <div class="mchart" id="mchart_${c}"></div>
+      <div class="hist" id="mhist_${c}"><div class="dim" style="font-size:11px">no trades yet</div></div>
+    </div>`).join('');
+  if(typeof LightweightCharts !== 'undefined'){
+    for(const c of coins){
+      const ch = LightweightCharts.createChart(document.getElementById(`mchart_${c}`), {
+        layout:{background:{color:'#121820'}, textColor:'#7c8b9d', fontSize:10},
+        grid:{vertLines:{color:'#1f2a36'}, horzLines:{color:'#1f2a36'}},
+        rightPriceScale:{borderColor:'#1f2a36'},
+        timeScale:{borderColor:'#1f2a36', timeVisible:true},
+        crosshair:{mode:0}, height:220,
+      });
+      const series = ch.addCandlestickSeries({
+        upColor:'#2ebd85', downColor:'#e0516b', borderVisible:false,
+        wickUpColor:'#2ebd85', wickDownColor:'#e0516b',
+      });
+      coinCharts[c] = {chart: ch, series};
+    }
+  }
+  coinListBuilt = true;
+}
+
+async function loadCandles(){
+  try{
+    const d = await (await fetch('/api/candles?n=200')).json();
+    const coins = Object.keys(d);
+    if(!coins.length) return;
+    ensureCoinList(coins);
+    for(const c of coins){
+      const cc = coinCharts[c];
+      if(cc && d[c] && d[c].length) cc.series.setData(d[c]);
+    }
+  }catch(e){}
+}
+
+// ---------------------------------------------------------------------------
+//  Equity in real time. equity is written to the DB only at the decision cadence
+//  (once per decision_timeframe), which is too sparse for a smooth curve. We start from
+//  what is actually in the database (sparse but real points), then
+//  append on EVERY WS snapshot (every think_every_sec), so the curve
+//  is live between decisions (every think_every_sec) rather than a staircase
+//  that steps once every few hours.
+// ---------------------------------------------------------------------------
+let equityChart, equitySeries, initialCapital = null, lastEquityTime = 0;
+
+function initEquityChart(){
+  if(typeof LightweightCharts === 'undefined') return;
+  equityChart = LightweightCharts.createChart(document.getElementById('equitychart'), {
+    layout:{background:{color:'#121820'}, textColor:'#7c8b9d', fontSize:10},
+    grid:{vertLines:{color:'#1f2a36'}, horzLines:{color:'#1f2a36'}},
+    rightPriceScale:{borderColor:'#1f2a36'},
+    timeScale:{borderColor:'#1f2a36', timeVisible:true},
+    crosshair:{mode:0}, height:150,
+  });
+  equitySeries = equityChart.addAreaSeries({
+    lineColor:'#4da3ff', topColor:'rgba(77,163,255,0.25)', bottomColor:'rgba(77,163,255,0.02)',
+    lineWidth:1.5,
+  });
+}
+
+async function seedEquity(){
+  if(!equitySeries) return;
+  try{
+    const s = await (await fetch('/api/state')).json();
+    if(s.initial_capital) initialCapital = s.initial_capital;
+  }catch(e){}
+  try{
+    const h = await (await fetch('/api/history?n=500')).json();
+    const pts = (h.equity||[]).map(p => ({time: Math.floor(new Date(p.ts).getTime()/1000), value: p.value}));
+    if(pts.length){
+      equitySeries.setData(pts);
+      lastEquityTime = pts[pts.length-1].time;
+    }
+  }catch(e){}
+}
+
+function pushEquityPoint(value){
+  if(!equitySeries) return;
+  const t = Math.floor(Date.now()/1000);
+  if(t < lastEquityTime) return;   // never go backwards in time
+  equitySeries.update({time: t, value});
+  lastEquityTime = t;
+}
+
+function fmtTime(s){
+  const m = Math.floor(s/60), h = Math.floor(m/60);
+  return h>0 ? h+' h '+(m%60)+' min' : m+' min';
+}
+
+let firstRenderDone = false;
+
+function render(s){
+  if(!firstRenderDone){
+    // The first snapshot after a (re)load of the page only synchronizes
+    // lastRewardTs but does not flash: otherwise, if a reward had already happened
+    // earlier (before the browser reload), the page would color the dopamine
+    // neurons for an OLD event as if it were happening right now.
+    lastRewardTs = s.reward_ts || 0;
+    firstRenderDone = true;
+  }
+  // a new reward arrived: trigger the flash of dopamine neurons on the canvas.
+  // Extra freshness check (< 20 s from the current moment): without it any
+  // old event that arrived in a different snapshot would trigger a flash retroactively
+  const freshEnough = Math.abs(Date.now()/1000 - s.reward_ts) < 20;
+  if(s.reward_ts && s.reward_ts !== lastRewardTs && freshEnough){
+    lastRewardTs = s.reward_ts;
+    flashStartClient = performance.now();
+    flashSign = s.reward_sign || 0;
+  }
+
+  document.getElementById('equity').textContent =
+    s.equity.toLocaleString('en-GB', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + ' $';
+  if(initialCapital){
+    const pnl = (s.equity/initialCapital - 1) * 100;
+    const pnlEl = document.getElementById('pnl');
+    pnlEl.textContent = (pnl>=0?'+':'') + pnl.toFixed(1) + '%';
+    pnlEl.className = 'v ' + (pnl>=0?'up':'down');
+  }
+  pushEquityPoint(s.equity);
+  document.getElementById('ndec').textContent = s.n_decisions;
+  document.getElementById('next').textContent = fmtTime(s.next_decision_in);
+  document.getElementById('thoughts').textContent = (s.n_thoughts||0).toLocaleString('en-GB') + ' thoughts';
+
+  // The main badge is the state of the BRAIN ITSELF (asleep/paused/learning/thinking),
+  // not the trade execution mode. The account mode (paper/dry_run/...) remains
+  // a separate small line below: it is important information about money,
+  // but not what should catch the eye first.
+  const modeEl = document.getElementById('mode');
+  let stateText, stateBg, stateColor, stateBorder;
+  if(s.stopped){
+    stateText='ASLEEP · STOPPED'; stateBg='#241a24'; stateColor='#c98af0'; stateBorder='#3d2a44';
+  } else if(s.paused){
+    stateText='PAUSED'; stateBg='#241f14'; stateColor='#c9a15a'; stateBorder='#453a1e';
+  } else if(s.learning){
+    stateText='LEARNING'; stateBg='#142418'; stateColor='#40d97a'; stateBorder='#1e4530';
+  } else {
+    stateText='THINKING'; stateBg='#12202a'; stateColor='#5fb8e8'; stateBorder='#1c3a4a';
+  }
+  modeEl.textContent = stateText;
+  modeEl.style.background = stateBg;
+  modeEl.style.color = stateColor;
+  modeEl.style.borderColor = stateBorder;
+
+  const execLabels = {dry_run:'dry run · nothing is sent to the exchange', paper:'paper account',
+                      bybit_demo:'Bybit demo', binance_futures_testnet:'Binance testnet'};
+  document.getElementById('execmode').textContent = execLabels[s.mode] || s.mode;
+
+  const priceCoins = Object.keys(s.prices||{});
+  if(priceCoins.length) ensureCoinList(priceCoins);
+  for(const c of priceCoins){
+    const exp = s.exposure[c] ?? 0, w = s.weights[c] ?? 0;
+    const priceEl = document.getElementById(`mprice_${c}`);
+    if(priceEl) priceEl.textContent = s.prices[c].toLocaleString('en-GB',{maximumFractionDigits:2}) + ' $';
+    const expEl = document.getElementById(`mexp_${c}`);
+    if(expEl){
+      expEl.className = 'exp ' + (exp>1.05?'up':exp<0.95?'down':'dim');
+      expEl.innerHTML = `×${exp.toFixed(2)} multiplier · weight ${(w*100).toFixed(1)}%`;
+    }
+  }
+  document.getElementById('approve').style.display = s.pending_approval ? 'block' : 'none';
+  document.getElementById('pausebtn').textContent = s.paused ? 'Resume' : 'Pause';
+
+  // --- training panel: makes the process visible, not just "LEARNING" in the corner ---
+  const ck = s.checkpoint || {};
+  document.getElementById('ckpt').textContent = ck.path
+    ? `checkpoint: epoch ${ck.epoch ?? '—'}, val Sharpe ${ck.val_sharpe!=null ? ck.val_sharpe.toFixed(2) : '—'}${s.learning ? ' · fine-tuning online' : ' · fine-tuning off'}`
+    : (s.learning
+        ? 'no checkpoint, but learning online; starting from the initial connectome weights'
+        : 'no checkpoint: initial connectome weights (real FlyWire, but not trained on the market)');
+  const drift = s.weight_drift || 0;
+  document.getElementById('driftval').textContent = drift.toFixed(4);
+  document.getElementById('driftbar').style.width = Math.min(100, drift/0.05*100) + '%';
+  drawDrift(s.weight_history || []);
+  renderRewardFeed(s.reward_events || [], s.pending_count || 0);
+
+  if(s.tail_cmd){
+    // The ready-made command arrives from the server in full: the server also knows the exact
+    // Python (sys.executable) it is actually running under; a bare
+    // "python" often does not exist in PATH at all.
+    document.getElementById('tailcmd').textContent = s.tail_cmd;
+  }
+}
+
+function renderRewardFeed(events, pending){
+  const el = document.getElementById('rewardfeed');
+  const head = `<div class="dim" style="margin-bottom:4px">decisions awaiting reward: ${pending}</div>`;
+  if(!events.length){ el.innerHTML = head + '<div class="dim">no dopamine yet</div>'; return; }
+  const rows = events.slice(-6).reverse().map(e=>{
+    const t = new Date(e.ts).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
+    const coins = Object.entries(e.rewards||{})
+      .map(([k,v])=>`<span class="${v>=0?'up':'down'}">${k} ${v>=0?'+':''}${v.toFixed(2)}</span>`)
+      .join('  ');
+    return `<div style="margin-top:3px"><span class="t">${t}</span>  ${coins}</div>`;
+  }).join('');
+  el.innerHTML = head + rows;
+}
+
+function copyTailCmd(){
+  const t = document.getElementById('tailcmd').textContent;
+  navigator.clipboard?.writeText(t);
+}
+
+async function shutdownBrain(){
+  if(!confirm('Shut down the brain completely?\n\nThe dashboard will stop receiving new data. ' +
+              'To start it again, restart python -m flybrain.serve in the terminal.'))
+    return;
+  await post('/api/shutdown');
+}
+
+function drawDrift(hist){
+  const cv = document.getElementById('driftchart');
+  const ctx = cv.getContext('2d');
+  const w = cv.width, h = cv.height;
+  ctx.clearRect(0,0,w,h);
+  if(hist.length < 2) return;
+  const vals = hist.map(p=>p.drift), max = Math.max(...vals, 1e-6);
+  ctx.strokeStyle = '#f0b429'; ctx.lineWidth = 1.5; ctx.beginPath();
+  hist.forEach((p,i)=>{
+    const x = i/(hist.length-1)*w, y = h - (p.drift/max)*(h-4) - 2;
+    i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+  });
+  ctx.stroke();
+}
+
+let lastDec = 0, lastTradeId = null;
+async function refreshHistory(){
+  try{
+    const h = await (await fetch('/api/history?decisions_n=100&trades_n=200')).json();
+
+    const trades = h.trades || [];
+    const pnlMap = computeTradePnl(trades);
+
+    if((h.decisions||[]).length !== lastDec){
+      lastDec = h.decisions.length;
+      const log = document.getElementById('log');
+      log.innerHTML = '';
+      for(const d of h.decisions){
+        const cls = d.blocked ? 'blocked' : (d.executed ? 'trade' : '');
+        const exp = Object.entries(d.exposure||{})
+          .map(([k,v])=>`${k} ×${v.toFixed(2)}`).join('  ');
+        const t = new Date(d.ts).toLocaleString('en-GB',{day:'2-digit',month:'2-digit',
+                                                     hour:'2-digit',minute:'2-digit'});
+        log.insertAdjacentHTML('beforeend', `<div class="entry ${cls}">
+          <div class="t">${t}</div>
+          <div class="m">${exp}${d.executed?` · <span class="up">trades ${d.executed}</span>`:' · <span class="hold">hold</span>'}</div>
+          ${(d.reasons||[]).length?`<div class="r">${d.reasons.join('; ')}</div>`:''}
+        </div>`);
+      }
+    }
+
+    const newestId = trades.length ? trades[0].ts + trades[0].coin + trades[0].units : null;
+    if(newestId !== lastTradeId){
+      lastTradeId = newestId;
+      const tb = document.getElementById('trades_body');
+      tb.innerHTML = trades.map(tr => {
+        const t = new Date(tr.ts).toLocaleString('en-GB',{day:'2-digit',month:'2-digit',
+                                                       hour:'2-digit',minute:'2-digit'});
+        const sideCls = tr.side === 'buy' ? 'up' : 'down';
+        const sideLabel = tr.side === 'buy' ? 'buy' : 'sell';
+        const pnl = pnlMap.get(tradeKey(tr));
+        const pnlHtml = pnl != null
+          ? ` <span class="${pnl>=0?'up':'down'}">(${pnl>=0?'+':''}${pnl.toFixed(1)}%)</span>` : '';
+        return `<tr>
+          <td class="dim">${t}</td><td>${tr.coin}</td>
+          <td class="${sideCls}">${sideLabel}${pnlHtml}</td>
+          <td>${Math.abs(tr.units).toFixed(4)}</td>
+          <td>${tr.price.toLocaleString('en-GB',{maximumFractionDigits:2})}</td>
+          <td class="dim">${tr.fee.toFixed(2)}</td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="6" class="dim">no trades yet</td></tr>';
+    }
+
+    // decision history PER COIN: not only buys and sells (trades), but also
+    // "hold" on those decisions where no trade happened for this particular coin
+    // (a small target change, deadband); otherwise the list would look
+    // as if the fly had decided nothing at all between trades
+    renderCoinHistories(h.decisions || [], trades, pnlMap);
+  }catch(e){}
+}
+
+// Trade key for matching with a decision and for the PnL map: trades have no
+// id of their own in the API response; ts+coin+side+quantity are unique enough
+function tradeKey(tr){ return `${tr.ts}|${tr.coin}|${tr.side}|${tr.units}`; }
+
+// PnL of a sale is relative to the AVERAGE purchase price of the open position at that
+// moment (a rolling cost basis for each coin separately, in chronological order).
+function computeTradePnl(trades){
+  const byCoin = {};
+  for(const tr of trades) (byCoin[tr.coin] ||= []).push(tr);
+  const pnl = new Map();
+  for(const coin of Object.keys(byCoin)){
+    const asc = byCoin[coin].slice().sort((a,b)=> new Date(a.ts) - new Date(b.ts));
+    let avgCost = null, totalUnits = 0;
+    for(const tr of asc){
+      const u = Math.abs(tr.units);
+      if(tr.side === 'buy'){
+        const cost = (avgCost||0)*totalUnits + u*tr.price;
+        totalUnits += u;
+        avgCost = totalUnits>1e-9 ? cost/totalUnits : null;
+      } else {
+        if(avgCost != null) pnl.set(tradeKey(tr), (tr.price - avgCost)/avgCost*100);
+        totalUnits -= u;
+        if(totalUnits < 1e-9){ totalUnits = 0; avgCost = null; }
+      }
+    }
+  }
+  return pnl;
+}
+
+function renderCoinHistories(decisions, trades, pnlMap){
+  const tradeByKey = {};
+  for(const tr of trades) tradeByKey[`${tr.ts}|${tr.coin}`] = tr;
+
+  const byCoin = {};
+  for(const d of decisions){
+    for(const c of Object.keys(d.exposure||{})){
+      (byCoin[c] ||= []).push({ts: d.ts, trade: tradeByKey[`${d.ts}|${c}`]});
+    }
+  }
+  for(const c of Object.keys(byCoin)){
+    const el = document.getElementById(`mhist_${c}`);
+    if(!el) continue;
+    const rows = byCoin[c].slice(0, 6).map(item => {
+      const t = new Date(item.ts).toLocaleString('en-GB',{day:'2-digit',month:'2-digit',
+                                                     hour:'2-digit',minute:'2-digit'});
+      if(item.trade){
+        const tr = item.trade;
+        const cls = tr.side === 'buy' ? 'up' : 'down';
+        const label = tr.side === 'buy' ? 'buy' : 'sell';
+        const pnl = pnlMap.get(tradeKey(tr));
+        const pnlHtml = pnl != null
+          ? ` <span class="${pnl>=0?'up':'down'}">(${pnl>=0?'+':''}${pnl.toFixed(1)}%)</span>` : '';
+        return `<div class="hrow"><span class="t">${t}</span>
+          <span class="${cls}">${label} ${Math.abs(tr.units).toFixed(3)} at ${tr.price.toLocaleString('en-GB',{maximumFractionDigits:2})}${pnlHtml}</span></div>`;
+      }
+      return `<div class="hrow"><span class="t">${t}</span><span class="hold">hold</span></div>`;
+    }).join('');
+    el.innerHTML = rows || '<div class="dim" style="font-size:11px">no decisions yet</div>';
+  }
+}
+
+const EVENT_LABELS = {
+  engine_start: ['brain started', 'ev-start'],
+  engine_stop: ['brain stopped', 'ev-stop'],
+  checkpoint_switch: ['checkpoint switched', 'ev-warn'],
+  resumed: ['live experience restored from saved state', 'ev-start'],
+  state_saved: ['part of the queue was not saved', 'ev-warn'],
+  state_ignored: ['saved state ignored (checkpoint mismatch)', 'ev-warn'],
+  drift_limit: ['drift guard triggered', 'ev-danger'],
+  kill_switch_reset: ['daily stop reset manually', 'ev-warn'],
+  rollback: ['rolled back to the base checkpoint', 'ev-danger'],
+};
+
+async function refreshEvents(){
+  try{
+    const d = await (await fetch('/api/events?n=60')).json();
+    const el = document.getElementById('events');
+    const evs = d.events || [];
+    if(!evs.length){ el.innerHTML = '<div class="dim" style="font-size:11px">empty so far</div>'; return; }
+    el.innerHTML = evs.map(e => {
+      const [label, cls] = EVENT_LABELS[e.kind] || [e.kind, ''];
+      const t = new Date(e.ts).toLocaleString('en-GB',{day:'2-digit',month:'2-digit',
+                                                     hour:'2-digit',minute:'2-digit'});
+      return `<div class="event ${cls}">
+        <div class="t">${t}</div>
+        <div>${label}${e.detail ? ` — <span class="dim">${e.detail}</span>` : ''}</div>
+      </div>`;
+    }).join('');
+  }catch(e){}
+}
+
+async function rollbackToBase(){
+  if(!confirm('Roll the brain back to the BASE (cycle) checkpoint?\n\n' +
+              'All accumulated live experience (weights, learning statistics, reward ' +
+              'queue) will be erased irreversibly. The portfolio and the guards are not touched.'))
+    return;
+  const r = await (await fetch('/api/rollback', {method:'POST'})).json();
+  if(!r.ok) alert(r.reason || 'rollback failed');
+  refreshEvents();
+}
+
+async function resetKillSwitch(){
+  if(!confirm('Reset the daily stop-loss?\n\nIf the brain was stopped because of a drawdown, trading will resume.'))
+    return;
+  const r = await (await fetch('/api/kill_switch/reset', {method:'POST'})).json();
+  if(!r.ok) alert(r.reason || 'reset failed');
+  refreshEvents();
+}
+
+async function post(url){ await fetch(url,{method:'POST'}); }
+async function togglePause(){
+  const s = await (await fetch('/api/state')).json();
+  await post(s.paused ? '/api/resume' : '/api/pause');
+}
+
+// ---------------------------------------------------------------------------
+//  Stream from the server: text is state, binary is activations
+// ---------------------------------------------------------------------------
+function connect(){
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.binaryType = 'arraybuffer';
+  const conn = document.getElementById('conn');
+  ws.onopen = ()=>{ conn.textContent='connected'; ws.send('hi'); };
+  ws.onclose = ()=>{ conn.textContent='disconnected, reconnecting…'; setTimeout(connect, 2000); };
+  ws.onmessage = ev=>{
+    if(typeof ev.data === 'string'){ render(JSON.parse(ev.data)); }
+    else { activations = new Uint8Array(ev.data); spotDirty = true; }   // animate() paints it every frame
+  };
+}
+
+// ---------------------------------------------------------------------------
+//  Training cycles before going live: a separate poll, not through the
+//  websocket: training is a separate subprocess, not part of the trading loop.
+// ---------------------------------------------------------------------------
+const cycleLogOpen = {};
+
+async function loadCycles(){
+  try{
+    const d = await (await fetch('/api/cycles')).json();
+    renderCycles(d.cycles || [], !!d.any_running, d.queue || []);
+    // for open logs we pull a fresh tail, not only on click
+    for(const id of Object.keys(cycleLogOpen)){
+      if(cycleLogOpen[id]) refreshOpenLog(id);
+    }
+  }catch(e){}
+}
+
+async function refreshOpenLog(id){
+  const el = document.getElementById('cyclelog_'+id);
+  if(!el) return;
+  const d = await (await fetch(`/api/cycles/${id}/log?n=50`)).json();
+  el.textContent = (d.lines || []).join('\n') || '(no log yet)';
+}
+
+function fmtMin(sec){
+  if(sec == null) return '';
+  const m = Math.floor(sec/60), s = sec % 60;
+  return m >= 60 ? `${Math.floor(m/60)} h ${m%60} min` : (m > 0 ? `${m} min ${s} s` : `${s} s`);
+}
+
+function renderCycles(cycles, anyRunning, queue){
+  const el = document.getElementById('cycles');
+  const all = document.getElementById('cycles_all');
+  const total = cycles.reduce((a,c)=>a + (c.est_minutes||0), 0);
+  all.innerHTML = anyRunning
+    ? `<span class="dim" style="font-size:11px">training in progress${queue.length ? ' · ' + queue.length + ' more in queue' : ''}</span>
+       ${queue.length ? '<button onclick="clearQueue()">Clear queue</button>' : ''}`
+    : `<button class="go" onclick="startAll()">Run all ${cycles.length} in sequence</button>
+       <span class="dim" style="font-size:11px">≈ ${Math.round(total/60*10)/10} h including cool-down pauses</span>`;
+  const badges = {idle:['waiting','badge-idle'], running:['training','badge-running'],
+                  done:['done','badge-done'], failed:['failed','badge-failed']};
+  el.innerHTML = cycles.map(c=>{
+    let [badgeText, badgeCls] = badges[c.status] || badges.idle;
+    if(c.queued){ badgeText = 'queued'; badgeCls = 'badge-idle'; }
+    const busy = anyRunning && c.status !== 'running';
+    let result = '';
+    if(c.result && c.result.blocks && c.result.blocks.length){
+      // Seasonal cycles (6 and 8): no single val, there are blocks: a layout of their own.
+      // We check for the PRESENCE of blocks, not c.id === 'cycle6_seasonal':
+      // hybrid cycle 8 uses the same train_seasonal.py and writes the same
+      // result shape; by id it would fall into the general branch and crash
+      // on r.val_sharpe, which a seasonal result does not have.
+      const r = c.result;
+      const rows = r.blocks.map(b=>{
+        const edge = b.fly_return - b.baseline_return;
+        return `<tr>
+          <td>${b.label}</td><td class="dim">${b.start}…${b.end}</td>
+          <td class="${b.fly_return>=0?'up':'down'}">${(b.fly_return*100).toFixed(1)}%</td>
+          <td class="dim">${(b.baseline_return*100).toFixed(1)}%</td>
+          <td class="${edge>=0?'up':'down'}">${edge>=0?'+':''}${(edge*100).toFixed(1)}</td>
+        </tr>`;
+      }).join('');
+      // the fields below appeared on 2026-09-16; runs of cycle 6 before that date
+      // do not have them, so we show each one only if it actually exists
+      const edgeTxt = r.mean_edge != null
+        ? ` · Sharpe edge <b class="${r.mean_edge>=0?'up':'down'}">${r.mean_edge>=0?'+':''}${r.mean_edge.toFixed(2)}</b>`
+        : '';
+      const how = [
+        r.rule,
+        r.decision_timeframe ? 'decisions ' + r.decision_timeframe : null,
+        r.select_by ? 'selected by ' + (r.select_by === 'return' ? 'return' : 'edge') : null,
+      ].filter(Boolean).join(' · ');
+      const goalPct = r.goal_return != null ? Math.round(r.goal_return*100) : null;
+      const goal = goalPct != null
+        ? `<div style="margin-top:4px">${r.hit_goal
+            ? `<span class="cyclebadge badge-done">goal +${goalPct}% per block reached ✅</span>`
+            : `<span class="cyclebadge badge-idle">${(r.mean_return*100).toFixed(1)}% of the +${goalPct}% goal per block</span>`}</div>`
+        : '';
+      result = `<div style="margin-top:7px;font-size:11px">
+        mean return across ${r.blocks.length} blocks: <b class="${r.mean_return>=0?'up':'down'}">${(r.mean_return*100).toFixed(1)}%</b>${edgeTxt}
+        · epoch ${r.best_epoch}/${r.epochs_done}${r.duration_sec ? ' · took ' + fmtMin(r.duration_sec) : ''}
+        ${how ? '<br><span class="dim">' + how + '</span>' : ''}
+        <table style="width:100%;margin-top:6px;font-size:10.5px;border-collapse:collapse">
+          <tr class="dim"><th style="text-align:left">period</th><th></th><th>fly</th><th>formula</th><th>Δ</th></tr>
+          ${rows}
+        </table>
+        ${goal}
+      </div>`;
+    } else if(c.result){
+      const r = c.result;
+      const cmp = r.baseline_sharpe != null
+        ? ` · formula <b>${r.baseline_sharpe.toFixed(2)}</b> → <b class="${r.edge_sharpe >= 0 ? 'up' : 'down'}">${r.edge_sharpe >= 0 ? '+' : ''}${r.edge_sharpe.toFixed(2)}</b>`
+        : '';
+      // Cycle 5: an explicit goal badge, not just one more Sharpe number. The goal
+      // is taken from result.json itself (goal_return), not hard-coded: it changed
+      // from +200% to +220%.
+      const goalPct = r.goal_return != null ? Math.round(r.goal_return*100) : 200;
+      const goal = r.hit_goal != null
+        ? `<div style="margin-top:4px">${r.hit_goal
+            ? `<span class="cyclebadge badge-done">goal +${goalPct}% reached ✅</span>`
+            : `<span class="cyclebadge badge-idle">return ${(r.val_return*100).toFixed(0)}% of the ${goalPct}% goal</span>`}</div>`
+        : '';
+      result = `<div style="margin-top:7px;font-size:11px">
+        val Sharpe fly <b>${r.val_sharpe.toFixed(2)}</b>${cmp}<br>
+        return ${(r.val_return*100).toFixed(1)}%
+        · drawdown ${(r.val_max_drawdown*100).toFixed(1)}% · trades ${r.val_trades}
+        · epoch ${r.best_epoch}/${r.epochs_done}${r.duration_sec ? ' · took ' + fmtMin(r.duration_sec) : ''}
+        ${goal}</div>`;
+    } else if(c.status === 'failed'){
+      result = `<div style="margin-top:7px;font-size:11px" class="down">failed: see the log</div>`;
+    }
+    const timing = c.status === 'running'
+      ? `<div class="dim" style="margin-top:5px;font-size:11px">running ${fmtMin(c.elapsed_sec)} of ≈ ${c.est_minutes} min</div>`
+      : `<div class="dim" style="margin-top:5px;font-size:11px">≈ ${c.est_minutes} min${c.est_note ? ' · ' + c.est_note : ''}</div>`;
+    const liveTag = c.is_live ? '<span class="cyclebadge badge-live">LIVE</span>' : '';
+    const logShown = cycleLogOpen[c.id] ? 'block' : 'none';
+    return `<div class="cyclecard">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+        <div><h3>${c.name}${liveTag}</h3><p>${c.description}</p></div>
+        <span class="cyclebadge ${badgeCls}">${badgeText}</span>
+      </div>
+      ${timing}
+      ${result}
+      <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+        <button ${c.status==='running' || busy ? 'disabled' : ''} onclick="startCycle('${c.id}')">
+          ${c.status==='done' || c.status==='failed' ? 'Rerun' : 'Run'}</button>
+        <button ${!c.has_checkpoint ? 'disabled' : ''} class="go" onclick="useCycle('${c.id}')">Make live</button>
+        <button onclick="toggleCycleLog('${c.id}')">Log</button>
+      </div>
+      <div id="cyclelog_${c.id}" class="cyclelog" style="display:${logShown}"></div>
+    </div>`;
+  }).join('');
+}
+
+async function startCycle(id){
+  const r = await (await fetch(`/api/cycles/${id}/start`, {method:'POST'})).json();
+  if(!r.ok) alert(r.reason || 'failed to start the cycle');
+  loadCycles();
+}
+
+async function startAll(){
+  if(!confirm('Run all cycles in sequence? This takes several hours; ' +
+              'keep the machine awake and avoid loading it with other work.')) return;
+  const r = await (await fetch('/api/cycles/start_all', {method:'POST'})).json();
+  if(!r.ok) alert(r.reason || 'failed');
+  loadCycles();
+}
+
+async function clearQueue(){
+  await fetch('/api/cycles/clear_queue', {method:'POST'});
+  loadCycles();
+}
+
+async function useCycle(id){
+  if(!confirm('Switch the live brain to this cycle\'s checkpoint?\n\n' +
+              'Current online learning will restart on the new weights; the weight drift ' +
+              'and pending rewards will be reset.'))
+    return;
+  const r = await (await fetch(`/api/cycles/${id}/use`, {method:'POST'})).json();
+  if(!r.ok) alert(r.reason || 'failed to switch the checkpoint');
+  loadCycles();
+}
+
+async function toggleCycleLog(id){
+  const willShow = !cycleLogOpen[id];
+  cycleLogOpen[id] = willShow;
+  const el = document.getElementById('cyclelog_'+id);
+  if(!willShow){ el.style.display = 'none'; return; }
+  const d = await (await fetch(`/api/cycles/${id}/log?n=50`)).json();
+  el.textContent = (d.lines || []).join('\n') || '(no log yet)';
+  el.style.display = 'block';
+}
+
+initBrain();
+initEquityChart();
+loadCandles();
+seedEquity();
+connect();
+loadCycles();
+refreshEvents();
+setInterval(refreshHistory, 3000);
+setInterval(loadCandles, 60000);
+setInterval(loadCycles, 5000);
+setInterval(refreshEvents, 5000);
+</script>
+</body>
+</html>

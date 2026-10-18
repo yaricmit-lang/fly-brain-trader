@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+#  Cycle 5 "100 -> 320 in a year": override on top of default.yaml.
+#
+#  Reworked 2026-09-16 (previously "100 -> 300", +200%, decisions every 4h):
+#
+#  1. Goal of +220% instead of +200% (stricter). It is set by the
+#     --goal-return flag of train.py (goal_return in cycles.py) and does not
+#     apply to this file directly.
+#  2. Decisions every hour instead of every 4 hours: the brain scans the
+#     market and decides to add/hold/exit HOURLY rather than every 4h. That
+#     is ~4x more decisions over the same history (more expensive to compute),
+#     but the intent was not to miss moves between decisions.
+#  3. Per-coin fundamental channels (Elliott waves for ETH, trend for BTC,
+#     mean reversion for gold, liquidity for ZEC, TVL for SOL) are amplified
+#     at the input: their values are multiplied by 1.6 after normalization.
+#     The brain still decides for itself whether to listen (this does not
+#     replace the decision), but with more weight at the input it has more
+#     reason to pay attention.
+#
+#  2026-09-16, second update (the "give the fly leverage" plan): the
+#  override's own exposure_max: 6.0 was removed. The first run showed it did
+#  not work: the formula's gross normalization (sum of |weights| > 1 almost
+#  always at the old target_daily_vol=0.04) consumed the multiplier before it
+#  could change anything, so raising the ceiling further was pointless.
+#  default.yaml now provides the physical leverage itself
+#  (baseline.max_gross=0.5, exposure_max=2.0, neutral exactly 1.0); cycle 5
+#  inherits it as is, and aggression here comes only from decision_timeframe
+#  and coin_feature_boost.
+# ---------------------------------------------------------------------------
+market:
+  decision_timeframe: 1h    # was 4h
+  coin_feature_boost: 1.6   # was 1.0 (no amplification)
+
+trading:
+  initial_capital: 100.0   # for readability on the dashboard (percentage returns do not depend on it)

@@ -1,0 +1,16 @@
+torch>=2.9
+numpy
+pandas
+polars
+pyarrow
+ccxt
+pydantic>=2
+pydantic-settings
+pyyaml
+python-dotenv
+requests
+fastapi
+uvicorn[standard]
+matplotlib
+pytest
+httpx

@@ -1,0 +1,55 @@
+# ---------------------------------------------------------------------------
+#  Cycle 7 "dopamine": override on top of default.yaml.
+#
+#  The brief was to "motivate the fly, raise the dopamine doses, even make it
+#  dependent". It is translated into mechanics honestly, and every knob is a
+#  concrete quantity in the code:
+#
+#  1. Dose = learning step size (hebbian.lr): relative to the new base lr
+#     (default.yaml: 0.05) the dose here is higher, with tolerance: it
+#     decays over epochs, otherwise the weights would blow up once the
+#     coarse structure has been learned (model.homeostatic also guards
+#     against this).
+#  2. It remembers longer what led to the reward (eligibility_decay 0.8 -> 0.9).
+#  3. More probing (exploration_noise x2.3), also decaying over epochs.
+#  4. Faster hedonic adaptation (reward_baseline_decay 0.99 -> 0.95):
+#     the expectation adjusts faster, so there are more "surprises" (and
+#     dopamine is surprise, not reward).
+#  5. More epochs, more patience.
+#
+#  2026-09-16, update (reconnaissance before the "give the fly leverage"
+#  plan): gain_scale 2.0 / loss_scale 1.0 and activity_bonus 0.15 were
+#  removed. Measured: Plasticity._delta subtracts the EMA mean of the reward
+#  (training.hebbian.reward_baseline_decay), and both the gain/loss
+#  asymmetry and the unconditional activity_bonus shift precisely the MEAN
+#  of the reward, which the EMA baseline absorbs within the first ~100
+#  decisions. What actually reached the synapses was neither "greed" nor
+#  "dependence on acting" but a slightly increased VARIANCE of dopamine with
+#  no meaningful sign. Only the protocol knobs that really change the
+#  learning DYNAMICS were kept (dose, trace memory, noise, speed of
+#  expectation adaptation), not an illusory reward asymmetry.
+#
+#  What this does NOT do: it does not create information in the data. Price
+#  direction is unpredictable (docs/METHODOLOGY.md part 1.5) at any dose. The expected
+#  effect is a more active, bolder fly with more trades; whether that is
+#  better in money terms is a matter of measurement, which is why the window
+#  and validation split are the same as in cycle 1: a one-to-one comparison
+#  where only the protocol differs.
+# ---------------------------------------------------------------------------
+training:
+  epochs: 8
+  early_stopping_patience: 4
+  hebbian:
+    lr: 0.08
+    eligibility_decay: 0.9
+    exploration_noise: 0.35
+    reward_baseline_decay: 0.95
+    lr_epoch_decay: 0.8
+    noise_epoch_decay: 0.85
+
+reward:
+  relative_to_baseline: true
+  risk_aversion: 0.0
+  gain_scale: 1.0
+  loss_scale: 1.0
+  activity_bonus: 0.0

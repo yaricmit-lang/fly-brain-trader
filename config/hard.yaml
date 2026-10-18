@@ -1,0 +1,30 @@
+# ---------------------------------------------------------------------------
+#  Hard cycle (cycle 4): override on top of default.yaml.
+#
+#  Three measured facts (docs/METHODOLOGY.md, cycles 1-3): price direction is not
+#  predictable, volatility is predictable, and the fly with the v2 reward
+#  sits exactly on the formula (+-0.08 Sharpe is noise). That gives two
+#  changes, each aimed at a specific cause:
+#
+#  1. Reward. The linear reward pos*r/vol with E[r]=0 cannot distinguish
+#     "took a lot of risk" from "took little": on average both are zero.
+#     Sharpe, however, improves precisely through risk timing. The quadratic
+#     utility A - lambda*A^2 fixes that, and subtracting the formula's
+#     utility removes common market noise from the dopamine signal.
+#  2. More data and longer training: 36 months instead of 14.
+#
+#  2026-09-16: the v3 volatility features (Parkinson/Garman-Klass/
+#  seasonality) and baseline_feature (COIN:base_weight) moved to
+#  default.yaml (D1). They turned out to be needed EVERYWHERE, not only
+#  here: the formula itself knows the 168h std, and without these channels
+#  the fly tried to beat it blind. The duplication was removed; only what is
+#  specific to cycle 4 remains here.
+# ---------------------------------------------------------------------------
+reward:
+  risk_aversion: 0.5              # A - 0.5*A^2: log-utility to a first approximation
+  relative_to_baseline: true      # dopamine = U(fly) - U(formula)
+  turnover_penalty: 0.15          # the fly paid 1.5x more in fees than the formula
+
+training:
+  epochs: 6
+  early_stopping_patience: 3

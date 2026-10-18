@@ -1,0 +1,57 @@
+# ---------------------------------------------------------------------------
+#  Cycle 8 "hybrid 5 + 6 + 2": an override on top of default.yaml.
+#
+#  Built from three previously completed cycles, taking one defining trait
+#  from each and nothing else:
+#
+#  From cycle 5 (growth): decisions EVERY HOUR instead of every 4h, per-coin
+#    fundamental channels amplified at the input (x1.6), epoch selection by
+#    RETURN (the --select-by return flag of train_seasonal.py, set in
+#    cycles.py), and a measurable target of x3.2 per year, which for a
+#    2-month block is +21.4% mean block return (--goal-return 0.214).
+#  From cycle 6 (seasons): the training scheme itself, 6 non-overlapping
+#    2-month periods (2 calm / 2 active / 2 medium by volatility), blocks
+#    shuffled within an epoch, each block evaluated separately. This is the
+#    flybrain.train_seasonal entrypoint.
+#  From cycle 2 (REINFORCE): the learning rule, a policy gradient instead of
+#    a Hebbian trace (training.rule below; train_seasonal.py has no --rule
+#    flag, the rule comes from this file).
+#
+#  Why this makes sense now. Each of the three traits looked like a failure
+#  on its own: cycle 5 returned +4.5% against a +220% target with a 40%
+#  drawdown, and cycle 2 was the only one with a negative edge (-0.31
+#  Sharpe) and best_epoch=1 (further training only made it worse). A
+#  diagnosis showed both failures were caused by bugs, not by the ideas:
+#    - In cycle 5 the reward horizon was tied to the decision stride, so at
+#      decision_timeframe=1h it silently shrank from 12h to 3h. The fly
+#      trained on near-pure noise and overtraded (fixed via
+#      reward.horizon_hours).
+#    - In cycle 2 the Beta policy was degenerate in exposure mode
+#      (mean01=(frac+1)/2 with frac~1 was always clamped to 0.999), and the
+#      sampled action was discarded while the raw network output was
+#      traded, so the gradient was computed for an action that never
+#      happened (fixed in ReinforcePlasticity.act).
+#    - The real trade cost is now part of the reward unconditionally, so
+#      hourly overtrading is penalized honestly rather than through a toy
+#      turnover_penalty.
+#  The hybrid is a direct test of whether these fixes rescued both ideas at
+#  once.
+#
+#  NOTE on run cost: hourly decisions mean 4x more decisions over the same
+#  history, and REINFORCE is roughly 7x more expensive per decision than the
+#  Hebbian trace (measured: 52 ms vs 387 ms), so this is the most expensive
+#  cycle of all. In addition, the delayed-reward queue with a 12h horizon
+#  and a 1h stride holds 12 live autograd graphs per ensemble member
+#  instead of 3.
+# ---------------------------------------------------------------------------
+market:
+  decision_timeframe: 1h    # cycle 5: decide every hour, not every 4h
+  coin_feature_boost: 1.6   # cycle 5: amplify fundamental channels at the input
+
+training:
+  rule: reinforce           # cycle 2: policy gradient instead of a Hebbian trace
+  epochs: 3                 # fewer than the default 6: this cycle is the most expensive
+  early_stopping_patience: 2
+
+trading:
+  initial_capital: 100.0    # cycle 5: readable on the dashboard ("100 -> how much")
